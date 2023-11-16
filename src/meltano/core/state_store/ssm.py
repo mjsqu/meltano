@@ -2,16 +2,15 @@
 from __future__ import annotations
 
 import logging
-
-from collections.abc import Iterator
 from contextlib import contextmanager
 from functools import cached_property
+from urllib.parse import urlparse
 
 from meltano.core.job_state import JobState
+from meltano.core.state_store.base import StateStoreManager
 from meltano.core.state_store.filesystem import (
     InvalidStateBackendConfigurationException,
 )
-from meltano.core.state_store.base import StateStoreManager
 
 BOTO_INSTALLED = True
 
@@ -55,9 +54,9 @@ class SSMStateStoreManager(StateStoreManager):
 
     def __init__(
         self,
+        uri : str,
         aws_access_key_id: str | None = None,
         aws_secret_access_key: str | None = None,
-        prefix: str | None = None,
         endpoint_url: str | None = None,
         **kwargs,
     ):
@@ -71,18 +70,20 @@ class SSMStateStoreManager(StateStoreManager):
             kwargs: additional keyword args to pass to parent
         """
         super().__init__(**kwargs)
-        self.aws_access_key_id = aws_access_key_id #or self.parsed.username
-        self.aws_secret_access_key = aws_secret_access_key #or self.parsed.password
-        self.prefix = prefix #or self.parsed.path
-        if not self.prefix.endswith('/'):
-            self.prefix = f"{self.prefix}/"
+        self.uri = uri
+        self.parsed = urlparse(self.uri)
+        self.prefix = f"/{self.parsed.netloc}{self.parsed.path}"
+        if self.prefix.endswith("/"):
+            self.prefix = self.prefix[:-1] 
+        self.aws_access_key_id = aws_access_key_id  # or self.parsed.username
+        self.aws_secret_access_key = aws_secret_access_key  # or self.parsed.password
         self.endpoint_url = endpoint_url
 
-    def convert_state_to_ssm_path(state_id):
+    def _convert_state_id_to_ssm_path(self,state_id):
         return f"{self.prefix}/{state_id.replace(':','/')}"
 
-    def convert_ssm_path_to_state(ssm_path):
-        return ssm_path.replace(self.prefix,"",1).replace('/',':')
+    def _convert_ssm_path_to_state_id(self,ssm_path):
+        return ssm_path.replace(self.prefix + "/", "", 1).replace("/", ":")
 
     @cached_property
     def client(self):
@@ -124,7 +125,12 @@ class SSMStateStoreManager(StateStoreManager):
         """
         logger.info(f"Writing state to {self.label}")
         logger.info(f"{state.state_id=}")
-        response = self.client.put_parameter(Name=state.state_id,Value=state.json(),Type="String")
+        logger.info(f"{self.prefix=}")
+        ssm_path = self._convert_state_id_to_ssm_path(state.state_id)
+        logger.info(f"{ssm_path=}")
+        response = self.client.put_parameter(
+            Name=ssm_path, Value=state.json(), Type="String"
+        )
 
     def get(self, state_id):
         """Get the job state for the given state_id.
@@ -135,11 +141,12 @@ class SSMStateStoreManager(StateStoreManager):
         Returns:
             The current state for the given job
         """
-        response = self.client.get_parameter(Name=state_id)
-        parameter = response.get('Parameter')
-        parameter_value = parameter.get('Value')
-        return JobState.from_json(state_id,parameter_value)
-
+        ssm_path = self._convert_state_id_to_ssm_path(state_id)
+        logger.info(f"{ssm_path=}")
+        response = self.client.get_parameter(Name=ssm_path)
+        parameter = response.get("Parameter")
+        parameter_value = parameter.get("Value")
+        return JobState.from_json(state_id, parameter_value)
 
     def clear(self, state_id):
         """Clear state for the given state_id.
@@ -148,7 +155,9 @@ class SSMStateStoreManager(StateStoreManager):
             state_id: the state_id to clear state for
         """
         # self.client.delete_parameter
-        pass
+        ssm_path = self._convert_state_id_to_ssm_path(state_id)
+        logger.info(f"{ssm_path=}")
+        response = self.client.delete_parameter(Name=ssm_path)
 
     def get_state_ids(self, pattern: str | None = None):
         """Get all state_ids available in this state store manager.
@@ -160,7 +169,13 @@ class SSMStateStoreManager(StateStoreManager):
             Generator yielding names of available jobs
         """
         # get-parameters-by-path - and apply the 'pattern'
-        pass
+        logger.info(f"Looking for parameters at {self.prefix}")
+        ssm_paginator = self.client.get_paginator("get_parameters_by_path")
+        parameters = []
+        for page in ssm_paginator.paginate(Path=self.prefix,Recursive=True):
+            parameters += [self._convert_ssm_path_to_state_id(parameter.get('Name')) for parameter in page["Parameters"]]
+        logger.info(f"{parameters=}")
+        return parameters
 
     def acquire_lock(self, state_id):
         """Acquire a naive lock for the given job's state.
