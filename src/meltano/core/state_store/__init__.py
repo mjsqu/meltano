@@ -19,6 +19,7 @@ from meltano.core.state_store.filesystem import (
 )
 from meltano.core.state_store.google import GCSStateStoreManager
 from meltano.core.state_store.s3 import S3StateStoreManager
+from meltano.core.state_store.ssm import SSMStateStoreManager
 
 
 class StateBackend(str, Enum):
@@ -32,6 +33,7 @@ class StateBackend(str, Enum):
     AZURE = "azure"
     S3 = "s3"
     GCS = "gs"
+    SSM = "ssm-parameter"
 
     @classmethod
     def backends(cls) -> list[StateBackend]:
@@ -57,6 +59,7 @@ class StateBackend(str, Enum):
             self.S3: S3StateStoreManager,
             self.AZURE: AZStorageStateStoreManager,
             self.GCS: GCSStateStoreManager,
+            self.SSM: SSMStateStoreManager,
         }
 
     @property
